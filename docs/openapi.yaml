@@ -1,0 +1,464 @@
+openapi: 3.1.0
+info:
+  title: Kaftar HTTP API
+  version: 1.0.0
+  description: |
+    Human-maintained contract for the migrated service. A successful send means
+    committed to PostgreSQL, not delivered or necessarily published to RabbitMQ. All routes are unauthenticated; use a trusted network.
+    Status routes look up IDs globally, without filtering by their route channel.
+servers:
+  - url: http://localhost:1404
+    description: Local Docker Compose
+security: []
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Check HTTP liveness
+      description: Does not recheck database, broker, or provider readiness.
+      responses:
+        '200':
+          description: HTTP listener is alive
+          content:
+            application/json:
+              schema:
+                type: string
+                const: Ok
+  /api/v1/sms/send:
+    post:
+      operationId: sendSMS
+      summary: Queue an SMS
+      parameters:
+        - $ref: '#/components/parameters/MaxRetries'
+        - $ref: '#/components/parameters/SendAt'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SMSMessage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Queued'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/email/send:
+    post:
+      operationId: sendEmail
+      summary: Queue an email
+      parameters:
+        - $ref: '#/components/parameters/MaxRetries'
+        - $ref: '#/components/parameters/SendAt'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EmailMessage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Queued'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/mattermost/send:
+    post:
+      operationId: sendMattermost
+      summary: Queue a Mattermost message
+      parameters:
+        - $ref: '#/components/parameters/MaxRetries'
+        - $ref: '#/components/parameters/SendAt'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MattermostMessage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Queued'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/bale/send:
+    post:
+      operationId: sendBale
+      summary: Queue a Bale message
+      description: chat_id is checked by the sender at delivery, not at submission.
+      parameters:
+        - $ref: '#/components/parameters/MaxRetries'
+        - $ref: '#/components/parameters/SendAt'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BaleMessage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Queued'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/http/send:
+    post:
+      operationId: sendHTTP
+      summary: Queue an outbound HTTP request
+      description: |
+        Request bodies are sent as literal strings. This provider is disabled by
+        default. Delivery requires an operator-allowlisted host/port and, for private
+        destinations, a CIDR exception. Redirects and cookie persistence are disabled.
+        Policy failures appear in delivery status; do not expose the API to untrusted callers.
+      parameters:
+        - $ref: '#/components/parameters/MaxRetries'
+        - $ref: '#/components/parameters/SendAt'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HTTPMessage'
+      responses:
+        '200':
+          $ref: '#/components/responses/Queued'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+  /api/v1/sms/status:
+    get:
+      operationId: statusSMS
+      summary: Get message status by ID
+      parameters:
+        - $ref: '#/components/parameters/MessageID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+  /api/v1/email/status:
+    get:
+      operationId: statusEmail
+      summary: Get message status by ID
+      parameters:
+        - $ref: '#/components/parameters/MessageID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+  /api/v1/mattermost/status:
+    get:
+      operationId: statusMattermost
+      summary: Get message status by ID
+      parameters:
+        - $ref: '#/components/parameters/MessageID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+  /api/v1/bale/status:
+    get:
+      operationId: statusBale
+      summary: Get message status by ID
+      parameters:
+        - $ref: '#/components/parameters/MessageID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+  /api/v1/http/status:
+    get:
+      operationId: statusHTTP
+      summary: Get message status by ID
+      parameters:
+        - $ref: '#/components/parameters/MessageID'
+      responses:
+        '200':
+          $ref: '#/components/responses/Status'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/SendFailure'
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      description: |
+        Optional channel-scoped retry identity. Empty disables deduplication. Reusing
+        a nonempty key with the same normalized message, retry limit, and requested
+        schedule returns the original ID. Conflicting content returns 409. Keys remain
+        effective while their rows are retained. See docs/queue-contract.md for canonical comparison.
+      schema:
+        type: string
+        maxLength: 200
+        pattern: '^[!-~]*$'
+    MessageID:
+      name: id
+      in: query
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    MaxRetries:
+      name: max_retries
+      in: query
+      description: Defaults to zero; any negative integer normalizes to -1 for unlimited retries.
+      schema:
+        type: integer
+        default: 0
+    SendAt:
+      name: send_at
+      in: query
+      description: RFC3339 timestamp. Missing or past values queue immediately.
+      schema:
+        type: string
+        format: date-time
+  responses:
+    Status:
+      description: Persisted message status; lookup is not restricted by the route channel
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MessageStatus'
+    NotFound:
+      description: No message exists for the ID
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Queued:
+      description: Committed to PostgreSQL or matched an identical keyed submission; broker availability is not required and this is not a delivery receipt
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [id]
+            properties:
+              id:
+                type: string
+                format: uuid
+    BadRequest:
+      description: Invalid binding, query, attachment encoding, idempotency key, or message
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Conflict:
+      description: The channel-scoped idempotency key belongs to a different submission
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    SendFailure:
+      description: Submission could not be saved; retry with an idempotency key after an uncertain response
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    Unavailable:
+      description: No sender is enabled for the channel, or shutdown has begun
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Attachment:
+      type: object
+      description: Attachments without a name or data are skipped on HTTP submission.
+      properties:
+        name:
+          type: string
+        data:
+          type: string
+          contentEncoding: base64
+        content_type:
+          type: string
+          default: application/octet-stream
+        size:
+          type: integer
+          format: int64
+    SMSMessage:
+      type: object
+      required: [to, text]
+      properties:
+        to:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        text:
+          type: string
+          minLength: 1
+    EmailMessage:
+      type: object
+      required: [to, subject]
+      properties:
+        to:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        cc:
+          type: array
+          items:
+            type: string
+        bcc:
+          type: array
+          items:
+            type: string
+        subject:
+          type: string
+          minLength: 1
+        text_body:
+          type: string
+        html_body:
+          type: string
+          description: Takes precedence over text_body when nonempty.
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+    MattermostMessage:
+      type: object
+      required: [channel_id]
+      description: Requires nonempty text or title. At most one attachment is supported; additional attachments fail at delivery before network I/O.
+      properties:
+        channel_id:
+          type: string
+          minLength: 1
+        text:
+          type: string
+        title:
+          type: string
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+    BaleMessage:
+      type: object
+      description: At most one attachment is supported; additional attachments fail at delivery before network I/O.
+      properties:
+        chat_id:
+          type: string
+        text:
+          type: string
+        attachments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Attachment'
+    HTTPMessage:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string
+          description: Absolute HTTP or HTTPS destination without userinfo or fragment; operator allowlisting is enforced at delivery.
+        method:
+          type: string
+          default: POST
+        headers:
+          type: object
+          additionalProperties:
+            type: string
+        body:
+          type: string
+    MessageStatus:
+      type: object
+      required: [id, channel, status, status_text, retry_count, max_retries]
+      properties:
+        id:
+          type: string
+          format: uuid
+        channel:
+          type: string
+        status:
+          type: integer
+          enum: [1, 2, 3, 4, 5]
+          description: 1 pending, 2 sending (leased attempt), 3 failed (retry pending), 4 sent (provider accepted), 5 dead (budget or age exhausted).
+        status_text:
+          type: string
+          enum: [pending, sending, failed, sent, dead]
+        retry_count:
+          type: integer
+          description: Attempts after the initial attempt; expired leases consume the attempt budget.
+        max_retries:
+          type: integer
+        next_retry_at:
+          description: Initial future schedule or next retry due time; cleared at terminal completion.
+          type: string
+          format: date-time
+        last_error:
+          type: string
+        sent_at:
+          description: Time provider acceptance was persisted, not recipient receipt.
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+    Error:
+      type: object
+      required: [status, message, details]
+      properties:
+        status:
+          type: integer
+        message:
+          type: string
+        details:
+          type: [object, 'null']
+          additionalProperties: true
