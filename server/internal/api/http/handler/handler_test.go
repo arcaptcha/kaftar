@@ -11,6 +11,7 @@ import (
 
 	"github.com/arcaptcha/kaftar/server/internal/config"
 	"github.com/arcaptcha/kaftar/server/internal/entity"
+	"github.com/arcaptcha/kaftar/server/internal/observability"
 	"github.com/arcaptcha/kaftar/server/internal/repository"
 	"github.com/arcaptcha/kaftar/server/internal/service"
 	"github.com/google/uuid"
@@ -18,12 +19,18 @@ import (
 	"go.uber.org/zap"
 )
 
-type testApp struct{ service service.Service }
+type testApp struct {
+	service service.Service
+	health  *observability.Health
+	metrics *observability.Metrics
+}
 
 func (application testApp) Config() config.Config                   { return config.Config{} }
 func (application testApp) Logger() *zap.Logger                     { return zap.NewNop() }
 func (application testApp) Service(context.Context) service.Service { return application.service }
 func (application testApp) Shutdown(context.Context) error          { return nil }
+func (application testApp) Health() *observability.Health           { return application.health }
+func (application testApp) Metrics() *observability.Metrics         { return application.metrics }
 
 type testService struct {
 	message entity.Message
@@ -33,6 +40,9 @@ type testService struct {
 
 func (backend *testService) Shutdown(context.Context) error { return nil }
 func (backend *testService) BeginShutdown()                 {}
+func (backend *testService) Health() service.Health {
+	return service.Health{RelayRunning: true}
+}
 
 func (backend *testService) Send(_ context.Context, message entity.Message, options *service.SendOptions) (string, error) {
 	backend.message = message
@@ -47,7 +57,15 @@ func (backend *testService) Status(_ context.Context, id string) (entity.OutboxS
 func TestHTTPContract(test *testing.T) {
 	backend := &testService{}
 	router := echo.New()
-	RegisterApi(testApp{service: backend}, router)
+	metrics := observability.NewMetrics()
+	health := observability.NewHealth(
+		healthyPinger{},
+		func(context.Context, []entity.Channel) error { return nil },
+		backend,
+		metrics,
+		observability.HealthConfig{},
+	)
+	RegisterApi(testApp{service: backend, health: health, metrics: metrics}, router)
 	channels := []string{"sms", "email", "mattermost", "bale", "http"}
 	for _, channel := range channels {
 		test.Run(channel, func(test *testing.T) {
@@ -114,12 +132,25 @@ func TestHTTPContract(test *testing.T) {
 			}
 		})
 	}
+	for _, path := range []string{"/health", "/health/live", "/health/ready"} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK ||
+			!strings.Contains(response.Body.String(), `"status":"healthy"`) {
+			test.Fatalf("%s = %d %s", path, response.Code, response.Body)
+		}
+	}
 	response := httptest.NewRecorder()
-	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", nil))
-	if response.Code != http.StatusOK || strings.TrimSpace(response.Body.String()) != `"Ok"` {
-		test.Fatalf("health = %d %s", response.Code, response.Body)
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/metrics", nil))
+	if response.Code != http.StatusOK ||
+		!strings.Contains(response.Body.String(), "kaftar_build_info") {
+		test.Fatalf("metrics = %d %s", response.Code, response.Body)
 	}
 }
+
+type healthyPinger struct{}
+
+func (healthyPinger) PingContext(context.Context) error { return nil }
 
 func TestQueryTimeDefaults(test *testing.T) {
 	router := echo.New()

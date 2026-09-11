@@ -2,8 +2,8 @@ package outboxrepo
 
 import (
 	"context"
-
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
@@ -122,4 +122,45 @@ func TestRepo_UpdateState(t *testing.T) {
 	require.Len(t, result, 1)
 	require.Equal(t, entity.OutboxStateSent, result[0].State)
 	require.Equal(t, 3, result[0].MaxRetries) // make sure default preserved
+}
+
+func TestRepoStatsGroupsStatesAndOldestPending(t *testing.T) {
+	db := setupDB(t)
+	repo := New(db)
+	now := time.Now().UTC()
+	for _, outbox := range []*entity.Outbox{
+		{
+			Channel:    entity.ChannelHTTP,
+			Payload:    []byte(`{"url":"https://example.com"}`),
+			State:      entity.OutboxStatePending,
+			EligibleAt: now.Add(-time.Minute),
+		},
+		{
+			Channel:    entity.ChannelHTTP,
+			Payload:    []byte(`{"url":"https://example.com"}`),
+			State:      entity.OutboxStateFailed,
+			EligibleAt: now,
+		},
+		{
+			Channel:    entity.ChannelSMS,
+			Payload:    []byte(`{"to":["1"],"text":"test"}`),
+			State:      entity.OutboxStateSent,
+			EligibleAt: now,
+		},
+	} {
+		_, err := repo.Create(context.Background(), outbox)
+		require.NoError(t, err)
+	}
+
+	stats, err := repo.Stats(context.Background())
+	require.NoError(t, err)
+	require.Len(t, stats.Counts, 3)
+	require.Len(t, stats.OldestPending, 1)
+	require.Equal(t, entity.ChannelHTTP, stats.OldestPending[0].Channel)
+	require.WithinDuration(
+		t,
+		now.Add(-time.Minute),
+		stats.OldestPending[0].EligibleAt,
+		time.Millisecond,
+	)
 }

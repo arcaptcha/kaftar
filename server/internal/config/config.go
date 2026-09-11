@@ -18,10 +18,22 @@ type Config struct {
 	Bale               BaleSenderConfig       `envPrefix:"BALE_SENDER_"`
 	HttpSender         HttpSenderConfig       `envPrefix:"HTTP_SENDER_"`
 	Rabbitmq           RabbitmqConfig         `envPrefix:"RABBITMQ_"`
+	Health             HealthConfig           `envPrefix:"HEALTH_"`
+	Metrics            MetricsConfig          `envPrefix:"METRICS_"`
 }
 
 type HttpConfig struct {
 	Port uint16 `env:"PORT"`
+}
+
+type HealthConfig struct {
+	CheckTimeout     time.Duration `env:"CHECK_TIMEOUT" envDefault:"3s"`
+	ComponentTimeout time.Duration `env:"COMPONENT_TIMEOUT" envDefault:"2s"`
+}
+
+type MetricsConfig struct {
+	OutboxRefreshInterval time.Duration `env:"OUTBOX_REFRESH_INTERVAL" envDefault:"15s"`
+	OutboxRefreshTimeout  time.Duration `env:"OUTBOX_REFRESH_TIMEOUT" envDefault:"2s"`
 }
 
 type PostgresConfig struct {

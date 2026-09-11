@@ -2,9 +2,13 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 
 	"github.com/arcaptcha/kaftar/server/internal/config"
 	"github.com/arcaptcha/kaftar/server/internal/entity"
+	"github.com/arcaptcha/kaftar/server/internal/observability"
+	"github.com/arcaptcha/kaftar/server/internal/repository"
 	outboxrepo "github.com/arcaptcha/kaftar/server/internal/repository/outbox_repo"
 	"github.com/arcaptcha/kaftar/server/internal/service"
 	"github.com/arcaptcha/kaftar/server/internal/service/bale"
@@ -21,15 +25,25 @@ import (
 type App interface {
 	Logger() *zap.Logger
 	Config() config.Config
+	Health() *observability.Health
+	Metrics() *observability.Metrics
 	Service(ctx context.Context) service.Service
 	Shutdown(context.Context) error
 }
 
 type app struct {
-	cfg config.Config
-	log *zap.Logger
-	db  *gorm.DB
-	svc service.Service
+	cfg  config.Config
+	log  *zap.Logger
+	db   *gorm.DB
+	svc  service.Service
+	repo repository.DurableOutbox
+
+	health         *observability.Health
+	metrics        *observability.Metrics
+	runtimeCtx     context.Context
+	cancelRuntime  context.CancelFunc
+	collectorDone  <-chan struct{}
+	rabbitmqConfig *rabbitmq.Config
 }
 
 func New(c config.Config, l *zap.Logger) App {
@@ -37,16 +51,23 @@ func New(c config.Config, l *zap.Logger) App {
 		panic("logger is not configured")
 	}
 
+	runtimeCtx, cancelRuntime := context.WithCancel(context.Background())
 	app := &app{
-		cfg: c,
-		log: l,
+		cfg:           c,
+		log:           l,
+		metrics:       observability.NewMetrics(),
+		runtimeCtx:    runtimeCtx,
+		cancelRuntime: cancelRuntime,
 	}
 
 	if err := app.initDB(); err != nil {
 		l.Fatal("database initialization failed", zap.Error(err))
 	}
-	if err := app.initService(context.Background()); err != nil {
+	if err := app.initService(runtimeCtx); err != nil {
 		l.Fatal("service initialization failed", zap.Error(err))
+	}
+	if err := app.initObservability(); err != nil {
+		l.Fatal("observability initialization failed", zap.Error(err))
 	}
 	return app
 }
@@ -54,6 +75,10 @@ func New(c config.Config, l *zap.Logger) App {
 func (a *app) Config() config.Config { return a.cfg }
 
 func (a *app) Logger() *zap.Logger { return a.log }
+
+func (a *app) Health() *observability.Health { return a.health }
+
+func (a *app) Metrics() *observability.Metrics { return a.metrics }
 
 func (a *app) initDB() error {
 	if a.db != nil {
@@ -74,6 +99,7 @@ func (a *app) initDB() error {
 		return err
 	}
 	a.db = db
+	a.repo = outboxrepo.New(db)
 	return nil
 }
 
@@ -81,12 +107,13 @@ func (a *app) initService(ctx context.Context) error {
 	if a.svc != nil {
 		return nil
 	}
-	mqConnGetter := rabbitmq.NewConnectionGetter(&rabbitmq.Config{
+	a.rabbitmqConfig = &rabbitmq.Config{
 		Host: a.cfg.Rabbitmq.Host,
 		Port: a.cfg.Rabbitmq.Port,
 		User: a.cfg.Rabbitmq.Username,
 		Pass: a.cfg.Rabbitmq.Password,
-	})
+	}
+	mqConnGetter := rabbitmq.NewConnectionGetter(a.rabbitmqConfig)
 
 	senders := make([]entity.Sender, 0)
 	if a.cfg.SMS.Enabled {
@@ -136,13 +163,44 @@ func (a *app) initService(ctx context.Context) error {
 		senders = append(senders, httpSender)
 	}
 
-	cfg := &service.Config{MessageRetryMaxAge: a.cfg.MessageRetryMaxAge}
+	cfg := &service.Config{
+		MessageRetryMaxAge: a.cfg.MessageRetryMaxAge,
+		Observer:           a.metrics,
+	}
 
-	svc, err := service.New(ctx, a.Logger(), outboxrepo.New(a.db), mqConnGetter, cfg, senders...)
+	svc, err := service.New(ctx, a.Logger(), a.repo, mqConnGetter, cfg, senders...)
 	if err != nil {
 		a.log.Fatal("service creation failed", zap.Error(err))
 	}
 	a.svc = svc
+	return nil
+}
+
+func (a *app) initObservability() error {
+	database, err := a.db.DB()
+	if err != nil {
+		return err
+	}
+	a.health = observability.NewHealth(
+		database,
+		func(ctx context.Context, channels []entity.Channel) error {
+			return rabbitmq.Check(ctx, a.rabbitmqConfig, channels)
+		},
+		a.svc,
+		a.metrics,
+		observability.HealthConfig{
+			CheckTimeout:     a.cfg.Health.CheckTimeout,
+			ComponentTimeout: a.cfg.Health.ComponentTimeout,
+		},
+	)
+	a.collectorDone = a.metrics.StartOutboxCollector(
+		a.runtimeCtx,
+		a.repo,
+		observability.OutboxCollectorConfig{
+			Interval: a.cfg.Metrics.OutboxRefreshInterval,
+			Timeout:  a.cfg.Metrics.OutboxRefreshTimeout,
+		},
+	)
 	return nil
 }
 
@@ -157,13 +215,28 @@ func (a *app) Service(ctx context.Context) service.Service {
 }
 
 func (a *app) Shutdown(ctx context.Context) error {
-	err := a.svc.Shutdown(ctx)
-	if err != nil {
-		return err
-	}
-	connection, dbErr := a.db.DB()
+	serviceErr := a.svc.Shutdown(ctx)
+	a.cancelRuntime()
+	collectorErr := waitForCollector(ctx, a.collectorDone)
+	connection, dbErr := a.database()
 	if dbErr != nil {
-		return dbErr
+		return errors.Join(serviceErr, collectorErr, dbErr)
 	}
-	return connection.Close()
+	return errors.Join(serviceErr, collectorErr, connection.Close())
+}
+
+func (a *app) database() (*sql.DB, error) {
+	return a.db.DB()
+}
+
+func waitForCollector(ctx context.Context, done <-chan struct{}) error {
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }

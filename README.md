@@ -24,6 +24,9 @@ The server is migrated into `server/` and builds with **Go 1.26.5**. PostgreSQL 
 
 Source-migration task [0.1](todo/done/0.1-migrate-reference-service.md), reference-retirement task [0.1.1](todo/done/0.1.1-retire-reference-safely.md), delivery hardening task [0.1.2](todo/done/0.1.2-review-delivery-reliability.md), and provider hardening task [0.1.3](todo/done/0.1.3-harden-provider-contracts.md) are complete.
 
+Health checks and Prometheus metrics task
+[0.2](todo/done/0.2-add-health-checks-and-prometheus-metrics.md) is complete.
+
 The approved [hardening design](docs/hardening-design.md) adds durable reconciliation, channel-scoped idempotency, fenced delivery claims, and stricter provider contracts. External delivery remains at-least-once, not exactly-once.
 
 **Development use only:** the API has no authentication, and database/broker transport TLS is not configured. Do not expose it publicly. See the [migration inventory](docs/migration.md) for compatibility details and remaining gates.
@@ -55,10 +58,14 @@ From the repository root, with Docker Engine and the Compose plugin installed:
 cp server/.env.example server/.env
 # Set nonempty PostgreSQL and RabbitMQ passwords in server/.env.
 docker compose --env-file server/.env up --build -d --wait
-curl --fail http://localhost:1404/health
+curl --fail http://localhost:1404/health/ready
+curl --fail http://localhost:1404/metrics
 ```
 
-The health endpoint returns `"Ok"`. Providers are disabled by default; configure and enable only those you need in the ignored `server/.env`. The API is bound to localhost. Use disposable development credentials for Compose, never production secrets.
+The readiness endpoint verifies PostgreSQL, RabbitMQ, queue topology, and delivery workers. Provider
+services are reported without sending test messages. Providers are disabled by default; configure
+and enable only those you need in the ignored `server/.env`. The API and operational endpoints are
+bound to localhost. Use disposable development credentials for Compose, never production secrets.
 
 ```sh
 go -C server test ./...
@@ -76,6 +83,7 @@ Native builds require Go 1.26.5; the test suite additionally requires a C compil
 - [HTTP API — OpenAPI 3.1](docs/openapi.yaml)
 - [Direct queue contract](docs/queue-contract.md)
 - [Provider contracts and outbound security](docs/provider-contracts.md)
+- [Health checks and Prometheus metrics](docs/observability.md)
 - [Migration inventory and limitations](docs/migration.md)
 - [Future research and delivery plan](todo/future/research-and-delivery-plan.md)
 - [Task workflow](todo/AGENTS.md)

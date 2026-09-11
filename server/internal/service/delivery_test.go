@@ -52,6 +52,49 @@ type failingRepository struct {
 	createErr, finishErr error
 }
 
+type recordingObserver struct {
+	submissions []string
+	attempts    int
+	results     []string
+	workers     map[string]bool
+}
+
+func (observerValue *recordingObserver) ObserveBrokerError(
+	string,
+	entity.Channel,
+) {
+}
+
+func (observerValue *recordingObserver) ObserveDeliveryAttempt(entity.Channel) {
+	observerValue.attempts++
+}
+
+func (observerValue *recordingObserver) ObserveDeliveryResult(
+	_ entity.Channel,
+	outcome string,
+	_ time.Duration,
+) {
+	observerValue.results = append(observerValue.results, outcome)
+}
+
+func (observerValue *recordingObserver) ObserveSubmission(
+	_ entity.Channel,
+	outcome string,
+) {
+	observerValue.submissions = append(observerValue.submissions, outcome)
+}
+
+func (observerValue *recordingObserver) SetWorkerReady(
+	worker string,
+	channel entity.Channel,
+	ready bool,
+) {
+	if observerValue.workers == nil {
+		observerValue.workers = make(map[string]bool)
+	}
+	observerValue.workers[worker+":"+channel.String()] = ready
+}
+
 func (store failingRepository) Create(ctx context.Context, outbox *entity.Outbox) (*entity.Outbox, error) {
 	if store.createErr != nil {
 		return nil, store.createErr
@@ -206,4 +249,38 @@ func TestShutdownStopsAdmissionAndHonorsDeadline(test *testing.T) {
 	require.ErrorIs(test, workCtx.Err(), context.Canceled)
 	_, err := svc.Send(context.Background(), &entity.HTTPMessage{URL: "https://example.invalid"}, nil)
 	require.ErrorIs(test, err, ErrShuttingDown)
+	require.True(test, svc.Health().ShuttingDown)
+}
+
+func TestServiceReportsOperationalStateAndDeliveryMetrics(test *testing.T) {
+	svc, sender := deliveryFixture(test)
+	metrics := &recordingObserver{}
+	svc.observer = metrics
+	svc.setRelayRunning(true)
+	svc.setConsumerHealth(
+		entity.ChannelHTTP,
+		WorkerHealth{Running: true, Connected: true},
+	)
+
+	id, err := svc.Send(
+		context.Background(),
+		&entity.HTTPMessage{URL: "https://example.invalid"},
+		nil,
+	)
+	require.NoError(test, err)
+	delivery, settlement := makeDelivery(test, entity.Outbox{
+		ID:      uuid.MustParse(id),
+		Channel: entity.ChannelHTTP,
+	})
+	require.True(test, svc.handleDelivery(context.Background(), sender, delivery))
+	require.True(test, settlement.acked)
+
+	health := svc.Health()
+	require.True(test, health.RelayRunning)
+	require.True(test, health.Consumers[entity.ChannelHTTP].Connected)
+	require.Equal(test, []string{"accepted"}, metrics.submissions)
+	require.Equal(test, 1, metrics.attempts)
+	require.Equal(test, []string{"sent"}, metrics.results)
+	require.True(test, metrics.workers["relay:"])
+	require.True(test, metrics.workers["consumer:http"])
 }

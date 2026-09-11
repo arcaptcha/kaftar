@@ -14,7 +14,8 @@ All commands here start at the repository root. Do not run tests against the ref
 cp server/.env.example server/.env
 # Set nonempty PostgreSQL and RabbitMQ passwords in server/.env.
 docker compose --env-file server/.env up --build -d --wait
-curl --fail http://localhost:1404/health
+curl --fail http://localhost:1404/health/ready
+curl --fail http://localhost:1404/metrics
 docker compose --env-file server/.env logs server
 docker compose --env-file server/.env down
 ```
@@ -64,6 +65,8 @@ The complete example is [server/.env.example](../server/.env.example). Keep prov
 | `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB_NAME`, `POSTGRES_SCHEMA` | Required PostgreSQL connection. The migrated implementation disables transport TLS; restrict it to trusted environments. |
 | `RABBITMQ_HOST`, `RABBITMQ_PORT`, `RABBITMQ_USERNAME`, `RABBITMQ_PASSWORD` | Dispatch/ingress connection; outages do not prevent durable HTTP acceptance. No AMQP TLS is configured. |
 | `MESSAGE_RETRY_MAX_AGE` | Positive Go duration, such as `24h`, freezes a deadline from initial eligibility for newly accepted rows; empty/nonpositive disables the limit. |
+| `HEALTH_CHECK_TIMEOUT`, `HEALTH_COMPONENT_TIMEOUT` | Readiness request and per-component bounds; defaults are `3s` and `2s`. |
+| `METRICS_OUTBOX_REFRESH_INTERVAL`, `METRICS_OUTBOX_REFRESH_TIMEOUT` | Bounded backlog refresh controls; defaults are `15s` and `2s`. |
 | `SMS_SENDER_ENABLED`, `SMS_SENDER_API_KEY`, `SMS_SENDER_PHONE` | Kavenegar enablement, API credential, sender number. |
 | `EMAIL_SENDER_ENABLED`, `EMAIL_SENDER_HOST`, `EMAIL_SENDER_PORT`, `EMAIL_SENDER_USERNAME`, `EMAIL_SENDER_PASSWORD`, `EMAIL_SENDER_FROM_ADDRESS` | SMTP settings; empty From falls back to username. |
 | `MATTERMOST_SENDER_ENABLED`, `MATTERMOST_SENDER_URL`, `MATTERMOST_SENDER_PAT` | Mattermost enablement, base URL, personal access token. |
@@ -78,5 +81,6 @@ The complete example is [server/.env.example](../server/.env.example). Keep prov
 - [OpenAPI](openapi.yaml) is hand-maintained. The verified command is `npx --yes @redocly/cli lint docs/openapi.yaml --extends minimal`; its localhost-server warning is intentional. Do not regenerate Swagger artifacts.
 - [Queue contract](queue-contract.md) explains direct AMQP submission and durability caveats.
 - [Provider contracts](provider-contracts.md) explains success checks, SMTP TLS/cancellation, attachments, and destination restrictions.
+- [Health and metrics](observability.md) defines readiness, liveness, metric names, labels, and alerting guidance.
 - [Migration inventory](migration.md) records preserved behavior and known limitations.
 - The console framework remains undecided. Future `console/Dockerfile` and `deploy/combined.Dockerfile` are separate work; the combined image must supervise both processes. No placeholder console or supervisor is introduced here.

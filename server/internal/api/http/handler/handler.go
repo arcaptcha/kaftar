@@ -19,7 +19,10 @@ func RegisterApi(a app.App, e *echo.Echo) {
 }
 
 func (h *handler) Register() {
-	h.echo.GET("/health", h.health)
+	h.echo.GET("/health", h.readiness)
+	h.echo.GET("/health/live", h.liveness)
+	h.echo.GET("/health/ready", h.readiness)
+	h.echo.GET("/metrics", echo.WrapHandler(h.app.Metrics().Handler()))
 
 	api := h.echo.Group("/api/v1")
 

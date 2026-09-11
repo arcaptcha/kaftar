@@ -8,6 +8,7 @@ This directory contains detailed project documentation. It starts flat and gains
 - [HTTP API Contract](openapi.yaml) — human-maintained OpenAPI 3.1 specification.
 - [Delivery and Queue Contract](queue-contract.md) — durable acceptance, idempotency, scheduling, recovery, and direct submission encoding.
 - [Provider Contracts](provider-contracts.md) — acceptance checks, attachment/cancellation behavior, and outbound destination policy.
+- [Health and Metrics](observability.md) — readiness, liveness, Prometheus metrics, and alerting guidance.
 - [Reference Migration](migration.md) — completed source migration, compatibility, and separate retirement gates.
 - [Hardening Design](hardening-design.md) — approved reliability/provider design, original failure evidence, and validation requirements.
 

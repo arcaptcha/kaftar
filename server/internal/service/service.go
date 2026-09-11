@@ -20,13 +20,38 @@ import (
 
 type Service interface {
 	BeginShutdown()
+	Health() Health
 	Send(context.Context, entity.Message, *SendOptions) (string, error)
 	Status(context.Context, string) (entity.OutboxStatus, error)
 	Shutdown(context.Context) error
 }
 
 type MQConnectionGetter func() (*amqp.Connection, error)
-type Config struct{ MessageRetryMaxAge time.Duration }
+
+type Observer interface {
+	ObserveBrokerError(operation string, channel entity.Channel)
+	ObserveDeliveryAttempt(channel entity.Channel)
+	ObserveDeliveryResult(channel entity.Channel, outcome string, duration time.Duration)
+	ObserveSubmission(channel entity.Channel, outcome string)
+	SetWorkerReady(worker string, channel entity.Channel, ready bool)
+}
+
+type Config struct {
+	MessageRetryMaxAge time.Duration
+	Observer           Observer
+}
+
+type WorkerHealth struct {
+	Running   bool
+	Connected bool
+}
+
+type Health struct {
+	ShuttingDown bool
+	RelayRunning bool
+	Consumers    map[entity.Channel]WorkerHealth
+	Providers    []entity.Channel
+}
 
 func (config *Config) OrDefault() *Config {
 	if config == nil {
@@ -64,6 +89,10 @@ type service struct {
 	finished     chan struct{}
 	admissionMu  sync.Mutex
 	stopping     bool
+	healthMu     sync.RWMutex
+	relayRunning bool
+	consumers    map[entity.Channel]WorkerHealth
+	observer     Observer
 }
 
 func New(ctx context.Context, logger *zap.Logger, repo repository.DurableOutbox, getter MQConnectionGetter, cfg *Config, senders ...entity.Sender) (Service, error) {
@@ -72,7 +101,19 @@ func New(ctx context.Context, logger *zap.Logger, repo repository.DurableOutbox,
 	}
 	pollingCtx, stopPolling := context.WithCancel(ctx)
 	workCtx, cancelWork := context.WithCancel(ctx)
-	svc := &service{logger: logger, repo: repo, cfg: cfg.OrDefault(), mqConnGetter: getter, senders: make(map[entity.Channel]entity.Sender), stopPolling: stopPolling, cancelWork: cancelWork, finished: make(chan struct{})}
+	normalizedConfig := cfg.OrDefault()
+	svc := &service{
+		logger:       logger,
+		repo:         repo,
+		cfg:          normalizedConfig,
+		mqConnGetter: getter,
+		senders:      make(map[entity.Channel]entity.Sender),
+		stopPolling:  stopPolling,
+		cancelWork:   cancelWork,
+		finished:     make(chan struct{}),
+		consumers:    make(map[entity.Channel]WorkerHealth),
+		observer:     normalizedConfig.Observer,
+	}
 	for _, sender := range senders {
 		if sender == nil || !sender.Channel().IsValid() {
 			stopPolling()
@@ -80,6 +121,7 @@ func New(ctx context.Context, logger *zap.Logger, repo repository.DurableOutbox,
 			return nil, errors.New("invalid sender")
 		}
 		svc.senders[sender.Channel()] = sender
+		svc.consumers[sender.Channel()] = WorkerHealth{}
 	}
 	var workers sync.WaitGroup
 	workers.Add(1)
@@ -97,15 +139,20 @@ func (svc *service) Send(ctx context.Context, message entity.Message, options *S
 	stopping := svc.stopping
 	svc.admissionMu.Unlock()
 	if stopping {
+		svc.observeSubmission(channelOf(message), "shutting_down")
 		return "", ErrShuttingDown
 	}
 	if message == nil {
+		svc.observeSubmission("", "invalid")
 		return "", ErrInvalidSubmission
 	}
 	if _, exists := svc.senders[message.Channel()]; !exists {
+		svc.observeSubmission(message.Channel(), "unavailable")
 		return "", ErrSenderUnavailable
 	}
-	return svc.accept(ctx, message, options)
+	id, err := svc.accept(ctx, message, options)
+	svc.observeSubmission(message.Channel(), submissionOutcome(err))
+	return id, err
 }
 
 func (svc *service) accept(ctx context.Context, message entity.Message, options *SendOptions) (string, error) {
@@ -254,6 +301,8 @@ func awaitConfirmation(ctx context.Context, returns <-chan amqp.Return, confirma
 }
 
 func (svc *service) relay(ctx context.Context) {
+	svc.setRelayRunning(true)
+	defer svc.setRelayRunning(false)
 	for ctx.Err() == nil {
 		for channel := range svc.senders {
 			rows, err := svc.repo.ReserveDispatch(ctx, channel, time.Now().UTC(), 10*time.Second, 32)
@@ -266,6 +315,7 @@ func (svc *service) relay(ctx context.Context) {
 					return
 				}
 				if err := svc.publish(ctx, &row); err != nil {
+					svc.observeBrokerError("publish", channel)
 					svc.logger.Warn("notification dispatch failed", zap.String("channel", channel.String()))
 					break
 				}
@@ -278,6 +328,8 @@ func (svc *service) relay(ctx context.Context) {
 }
 
 func (svc *service) consume(pollingCtx, workCtx context.Context, destination entity.Channel, sender entity.Sender) {
+	svc.setConsumerHealth(destination, WorkerHealth{Running: true})
+	defer svc.setConsumerHealth(destination, WorkerHealth{})
 	for pollingCtx.Err() == nil {
 		svc.consumeConnection(pollingCtx, workCtx, destination, sender)
 		if !pause(pollingCtx, time.Second) {
@@ -287,8 +339,10 @@ func (svc *service) consume(pollingCtx, workCtx context.Context, destination ent
 }
 
 func (svc *service) consumeConnection(pollingCtx, workCtx context.Context, destination entity.Channel, sender entity.Sender) {
+	svc.setConsumerHealth(destination, WorkerHealth{Running: true})
 	connection, err := svc.mqConnection()
 	if err != nil {
+		svc.observeBrokerError("consume", destination)
 		return
 	}
 	setupCtx, cancel := context.WithTimeout(pollingCtx, 5*time.Second)
@@ -312,8 +366,11 @@ func (svc *service) consumeConnection(pollingCtx, workCtx context.Context, desti
 	stopSetup()
 	cancel()
 	if err != nil {
+		svc.observeBrokerError("consume", destination)
 		return
 	}
+	svc.setConsumerHealth(destination, WorkerHealth{Running: true, Connected: true})
+	defer svc.setConsumerHealth(destination, WorkerHealth{Running: true})
 	for {
 		select {
 		case <-pollingCtx.Done():
@@ -357,6 +414,7 @@ func (svc *service) handleDelivery(ctx context.Context, sender entity.Sender, de
 			return true
 		}
 		_, err = svc.accept(ctx, message, &SendOptions{MaxRetries: envelope.MaxRetries, SendAt: envelope.NextRetryAt, IdempotencyKey: envelope.MessageID})
+		svc.observeSubmission(channel, submissionOutcome(err))
 		if err != nil {
 			permanent := errors.Is(err, ErrInvalidSubmission) || errors.Is(err, repository.ErrIdempotencyConflict)
 			if permanent {
@@ -386,6 +444,8 @@ func (svc *service) handleDelivery(ctx context.Context, sender entity.Sender, de
 		return true
 	}
 	message, err := entity.UnmarshalMessage(outbox.Channel, outbox.Payload)
+	attemptStarted := time.Now()
+	svc.observeDeliveryAttempt(sender.Channel())
 	if err == nil {
 		attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		err = sender.Send(attemptCtx, message)
@@ -407,10 +467,20 @@ func (svc *service) handleDelivery(ctx context.Context, sender entity.Sender, de
 		}
 	}
 	if err := svc.repo.Finish(ctx, outbox, now); err != nil {
+		svc.observeDeliveryResult(
+			sender.Channel(),
+			"completion_error",
+			time.Since(attemptStarted),
+		)
 		svc.logger.Warn("outbox completion failed", zap.String("channel", sender.Channel().String()))
 		_ = delivery.Nack(false, true)
 		return false
 	}
+	svc.observeDeliveryResult(
+		sender.Channel(),
+		deliveryOutcome(outbox.State),
+		time.Since(attemptStarted),
+	)
 	_ = delivery.Ack(false)
 	return true
 }
@@ -467,6 +537,113 @@ func (svc *service) BeginShutdown() {
 	svc.stopping = true
 	svc.admissionMu.Unlock()
 	svc.stopPolling()
+}
+
+func (svc *service) Health() Health {
+	svc.admissionMu.Lock()
+	stopping := svc.stopping
+	svc.admissionMu.Unlock()
+
+	svc.healthMu.RLock()
+	defer svc.healthMu.RUnlock()
+	consumers := make(map[entity.Channel]WorkerHealth, len(svc.senders))
+	providers := make([]entity.Channel, 0, len(svc.senders))
+	for channel := range svc.senders {
+		consumers[channel] = svc.consumers[channel]
+		providers = append(providers, channel)
+	}
+	return Health{
+		ShuttingDown: stopping,
+		RelayRunning: svc.relayRunning,
+		Consumers:    consumers,
+		Providers:    providers,
+	}
+}
+
+func (svc *service) setRelayRunning(running bool) {
+	svc.healthMu.Lock()
+	svc.relayRunning = running
+	svc.healthMu.Unlock()
+	if svc.observer != nil {
+		svc.observer.SetWorkerReady("relay", "", running)
+	}
+}
+
+func (svc *service) setConsumerHealth(channel entity.Channel, health WorkerHealth) {
+	svc.healthMu.Lock()
+	if svc.consumers == nil {
+		svc.consumers = make(map[entity.Channel]WorkerHealth)
+	}
+	svc.consumers[channel] = health
+	svc.healthMu.Unlock()
+	if svc.observer != nil {
+		svc.observer.SetWorkerReady("consumer", channel, health.Connected)
+	}
+}
+
+func (svc *service) observeSubmission(channel entity.Channel, outcome string) {
+	if svc.observer != nil {
+		svc.observer.ObserveSubmission(channel, outcome)
+	}
+}
+
+func (svc *service) observeDeliveryAttempt(channel entity.Channel) {
+	if svc.observer != nil {
+		svc.observer.ObserveDeliveryAttempt(channel)
+	}
+}
+
+func (svc *service) observeDeliveryResult(
+	channel entity.Channel,
+	outcome string,
+	duration time.Duration,
+) {
+	if svc.observer != nil {
+		svc.observer.ObserveDeliveryResult(channel, outcome, duration)
+	}
+}
+
+func (svc *service) observeBrokerError(operation string, channel entity.Channel) {
+	if svc.observer != nil {
+		svc.observer.ObserveBrokerError(operation, channel)
+	}
+}
+
+func channelOf(message entity.Message) entity.Channel {
+	if message == nil {
+		return ""
+	}
+	return message.Channel()
+}
+
+func submissionOutcome(err error) string {
+	switch {
+	case err == nil:
+		return "accepted"
+	case errors.Is(err, ErrInvalidSubmission):
+		return "invalid"
+	case errors.Is(err, ErrSenderUnavailable):
+		return "unavailable"
+	case errors.Is(err, ErrShuttingDown):
+		return "shutting_down"
+	case errors.Is(err, repository.ErrIdempotencyConflict):
+		return "conflict"
+	default:
+		return "error"
+	}
+}
+
+func deliveryOutcome(state entity.OutboxState) string {
+	switch state {
+	case entity.OutboxStateSent:
+		return "sent"
+	case entity.OutboxStateFailed:
+		return "retry"
+	case entity.OutboxStateDead:
+		return "dead"
+	default:
+		return "invalid"
+	}
 }
 
 func (svc *service) Shutdown(ctx context.Context) error {

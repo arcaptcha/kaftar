@@ -24,10 +24,12 @@ type httpServer struct {
 }
 
 func NewServer(app app.App) Server {
-	return &httpServer{
+	server := &httpServer{
 		echo: echo.New(),
 		app:  app,
 	}
+	server.echo.Use(app.Metrics().Middleware)
+	return server
 }
 
 func (s *httpServer) Start() error {

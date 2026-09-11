@@ -26,4 +26,21 @@ type DurableOutbox interface {
 	ReserveDispatch(context.Context, entity.Channel, time.Time, time.Duration, int) ([]entity.Outbox, error)
 	Claim(context.Context, string, entity.Channel, time.Time, time.Duration) (*entity.Outbox, error)
 	Finish(context.Context, *entity.Outbox, time.Time) error
+	Stats(context.Context) (OutboxStats, error)
+}
+
+type OutboxCount struct {
+	Channel entity.Channel
+	State   entity.OutboxState
+	Count   int64
+}
+
+type OldestPending struct {
+	Channel    entity.Channel
+	EligibleAt time.Time
+}
+
+type OutboxStats struct {
+	Counts        []OutboxCount
+	OldestPending []OldestPending
 }

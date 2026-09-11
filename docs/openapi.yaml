@@ -14,16 +14,47 @@ paths:
   /health:
     get:
       operationId: health
-      summary: Check HTTP liveness
-      description: Does not recheck database, broker, or provider readiness.
+      summary: Check readiness through the compatibility endpoint
+      description: Equivalent to `/health/ready` for existing deployments.
       responses:
         '200':
-          description: HTTP listener is alive
+          $ref: '#/components/responses/HealthReady'
+        '503':
+          $ref: '#/components/responses/HealthUnavailable'
+  /health/live:
+    get:
+      operationId: liveness
+      summary: Check process liveness
+      description: Does not call remote dependencies and fails after shutdown begins.
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthReady'
+        '503':
+          $ref: '#/components/responses/HealthUnavailable'
+  /health/ready:
+    get:
+      operationId: readiness
+      summary: Check dependency and service readiness
+      description: |
+        Checks PostgreSQL, RabbitMQ and queue topology, the relay, enabled
+        consumers, and provider service state. Informational provider checks do
+        not cause HTTP 503. Remote provider delivery is not probed.
+      responses:
+        '200':
+          $ref: '#/components/responses/HealthReady'
+        '503':
+          $ref: '#/components/responses/HealthUnavailable'
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Export Prometheus metrics
+      responses:
+        '200':
+          description: Prometheus text exposition
           content:
-            application/json:
+            text/plain:
               schema:
                 type: string
-                const: Ok
   /api/v1/sms/send:
     post:
       operationId: sendSMS
@@ -266,6 +297,18 @@ components:
         type: string
         format: date-time
   responses:
+    HealthReady:
+      description: All critical checks are healthy
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HealthReport'
+    HealthUnavailable:
+      description: At least one critical check is unavailable
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/HealthReport'
     Status:
       description: Persisted message status; lookup is not restricted by the route channel
       content:
@@ -314,6 +357,49 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
   schemas:
+    HealthReport:
+      type: object
+      required: [status, checked_at, checks]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, unhealthy]
+        checked_at:
+          type: string
+          format: date-time
+        checks:
+          type: array
+          items:
+            $ref: '#/components/schemas/HealthCheck'
+    HealthCheck:
+      type: object
+      required: [name, kind, status, critical, duration_ms]
+      properties:
+        name:
+          type: string
+        kind:
+          type: string
+          enum: [process, dependency, service, provider]
+        status:
+          type: string
+          enum: [healthy, degraded, disabled, unhealthy]
+        critical:
+          type: boolean
+        reason:
+          type: string
+          enum:
+            - canceled
+            - disabled
+            - disconnected
+            - not_configured
+            - remote_unverified
+            - shutting_down
+            - stopped
+            - timeout
+            - unavailable
+        duration_ms:
+          type: number
+          minimum: 0
     Attachment:
       type: object
       description: Attachments without a name or data are skipped on HTTP submission.

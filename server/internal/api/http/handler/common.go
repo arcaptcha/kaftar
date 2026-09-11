@@ -13,9 +13,22 @@ import (
 	"github.com/labstack/echo/v4"
 )
 
-// health godoc
-func (h *handler) health(c echo.Context) error {
-	return c.JSON(http.StatusOK, "Ok")
+func (h *handler) liveness(c echo.Context) error {
+	report := h.app.Health().Liveness(c.Request().Context())
+	status := http.StatusOK
+	if !report.Ready() {
+		status = http.StatusServiceUnavailable
+	}
+	return c.JSON(status, report)
+}
+
+func (h *handler) readiness(c echo.Context) error {
+	report := h.app.Health().Readiness(c.Request().Context())
+	status := http.StatusOK
+	if !report.Ready() {
+		status = http.StatusServiceUnavailable
+	}
+	return c.JSON(status, report)
 }
 
 func sendError(c echo.Context, e *dto.Error) error {
